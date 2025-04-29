@@ -1,0 +1,343 @@
+import discord
+import requests
+import asyncio
+import os
+import urllib.parse
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+RIOT_API_KEY = os.getenv("RIOT_API_KEY")
+
+REGION = "kr"
+REGION_ROUTING = "asia"
+
+intents = discord.Intents.default()
+intents.message_content = True
+bot = discord.Client(intents=intents)
+
+monitoring_list = set()  # 3연패 이상 감시 리스트
+real_time_monitoring_list = set()  # 실시간 게임 감시 리스트
+monitoring_channel = None
+
+TIER_ICON_URL = "https://raw.communitydragon.org/15.2/plugins/rcp-fe-lol-static-assets/global/default/images/ranked-emblem/emblem-{tier}.png"
+
+async def fetch_summoner_info(game_name, tag_line):
+    headers = {'X-Riot-Token': RIOT_API_KEY}
+    game_name_encoded = urllib.parse.quote(game_name)
+    tag_line_encoded = urllib.parse.quote(tag_line)
+    account_url = f'https://{REGION_ROUTING}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_name_encoded}/{tag_line_encoded}'
+    account_res = requests.get(account_url, headers=headers)
+    if account_res.status_code != 200:
+        return None
+    account_data = account_res.json()
+    puuid = account_data.get('puuid')
+
+    summoner_url = f'https://{REGION}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}'
+    summoner_res = requests.get(summoner_url, headers=headers)
+    if summoner_res.status_code != 200:
+        return None
+    summoner_data = summoner_res.json()
+
+    return {
+        'puuid': puuid,
+        'summoner_id': summoner_data.get('id'),
+        'profile_icon_id': summoner_data.get('profileIconId'),
+        'name': summoner_data.get('name')
+    }
+
+async def fetch_rank_info(summoner_id):
+    headers = {'X-Riot-Token': RIOT_API_KEY}
+    league_url = f'https://{REGION}.api.riotgames.com/lol/league/v4/entries/by-summoner/{summoner_id}'
+    league_res = requests.get(league_url, headers=headers)
+    if league_res.status_code != 200:
+        return None
+    ranks = league_res.json()
+    solo_rank = next((r for r in ranks if r['queueType'] == 'RANKED_SOLO_5x5'), None)
+    return solo_rank
+
+async def create_rank_embed(game_name, tag_line, summoner_info, rank_info):
+    tier = rank_info['tier'] if rank_info else 'Unranked'
+    rank = rank_info['rank'] if rank_info else '-'
+    lp = rank_info['leaguePoints'] if rank_info else 0
+    wins = rank_info['wins'] if rank_info else 0
+    losses = rank_info['losses'] if rank_info else 0
+    winrate = round(wins / (wins + losses) * 100, 2) if (wins + losses) > 0 else 0
+
+    embed = discord.Embed(
+        title=f"{game_name}#{tag_line} 전적",
+        color=discord.Color.blue()
+    )
+    if summoner_info['profile_icon_id']:
+        profile_icon_url = f"http://ddragon.leagueoflegends.com/cdn/14.8.1/img/profileicon/{summoner_info['profile_icon_id']}.png"
+        embed.set_author(name="LoL 전적 검색", icon_url=profile_icon_url)
+
+    if tier != 'Unranked':
+        tier_icon_url = TIER_ICON_URL.format(tier=tier.lower())
+        embed.set_thumbnail(url=tier_icon_url)
+
+    embed.add_field(name="티어", value=f"{tier} {rank}", inline=True)
+    embed.add_field(name="LP", value=f"{lp} LP", inline=True)
+    embed.add_field(name="승/패", value=f"{wins}승 {losses}패", inline=True)
+    embed.add_field(name="승률", value=f"{winrate}%", inline=True)
+    embed.add_field(
+      name="상세 전적",
+      value=f"[lol.ps](https://lol.ps/summoner/{game_name}_{tag_line}?region=kr)",
+      inline=False
+    )
+
+    return embed
+
+async def check_in_game_status(summoner_id):
+    headers = {'X-Riot-Token': RIOT_API_KEY}
+    url = f'https://{REGION}.api.riotgames.com/lol/spectator/v4/active-games/by-summoner/{summoner_id}'
+    response = requests.get(url, headers=headers)
+    return response.status_code == 200
+
+async def monitoring_task():
+    await bot.wait_until_ready()
+    last_alert = {}
+
+    while not bot.is_closed():
+        if monitoring_channel is None or not monitoring_list:
+            await asyncio.sleep(900)
+            continue
+
+        for riot_id in monitoring_list:
+            game_name, tag_line = riot_id.split('#')
+            summoner_info = await fetch_summoner_info(game_name, tag_line)
+            if not summoner_info:
+                continue
+
+            puuid = summoner_info['puuid']
+            headers = {'X-Riot-Token': RIOT_API_KEY}
+            match_url = f'https://{REGION_ROUTING}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start=0&count=10'
+            match_res = requests.get(match_url, headers=headers)
+            if match_res.status_code != 200:
+                continue
+            match_ids = match_res.json()
+
+            lose_streak = 0
+            for match_id in match_ids:
+                match_detail_url = f'https://{REGION_ROUTING}.api.riotgames.com/lol/match/v5/matches/{match_id}'
+                match_detail_res = requests.get(match_detail_url, headers=headers)
+                if match_detail_res.status_code != 200:
+                    continue
+                match_detail = match_detail_res.json()
+                participants = match_detail['info']['participants']
+                player = next((p for p in participants if p['puuid'] == puuid), None)
+                if player:
+                    if player['win']:
+                        break
+                    else:
+                        lose_streak += 1
+
+            if lose_streak >= 3 and last_alert.get(riot_id) != lose_streak:
+                embed = discord.Embed(
+                    title=f"{game_name}#{tag_line} {lose_streak}연패 중!",
+                    color=discord.Color.red()
+                )
+                await monitoring_channel.send(embed=embed)
+                last_alert[riot_id] = lose_streak
+
+        await asyncio.sleep(900)
+
+async def real_time_monitoring_task():
+    await bot.wait_until_ready()
+    last_in_game_status = {}
+
+    while not bot.is_closed():
+        if monitoring_channel is None or not real_time_monitoring_list:
+            await asyncio.sleep(300)
+            continue
+
+        for riot_id in real_time_monitoring_list:
+            game_name, tag_line = riot_id.split('#')
+            summoner_info = await fetch_summoner_info(game_name, tag_line)
+            if not summoner_info:
+                continue
+
+            summoner_id = summoner_info['summoner_id']
+            in_game = await check_in_game_status(summoner_id)
+
+            if in_game and last_in_game_status.get(riot_id) != "in_game":
+                embed = discord.Embed(
+                    title=f"{game_name}#{tag_line} 게임 시작!",
+                    description="🕹️ 현재 게임이 진행 중입니다!",
+                    color=discord.Color.gold()
+                )
+                await monitoring_channel.send(embed=embed)
+                last_in_game_status[riot_id] = "in_game"
+
+            elif not in_game:
+                last_in_game_status[riot_id] = "idle"
+
+        await asyncio.sleep(300)
+
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user}')
+    bot.loop.create_task(monitoring_task())
+    bot.loop.create_task(real_time_monitoring_task())
+
+@bot.event
+async def on_message(message):
+    global monitoring_channel
+
+    if message.author == bot.user:
+        return
+
+    if message.content.startswith('!전적 '):
+        riot_id = message.content[4:].strip()
+        if '#' not in riot_id:
+            await message.channel.send('올바른 형식: 이름#태그')
+            return
+
+        game_name, tag_line = riot_id.split('#', 1)
+        await message.channel.send(f"[{game_name}#{tag_line}] 전적을 불러오는 중...")
+
+        summoner_info = await fetch_summoner_info(game_name, tag_line)
+        if not summoner_info:
+            await message.channel.send('소환사 정보를 찾을 수 없습니다.')
+            return
+
+        rank_info = await fetch_rank_info(summoner_info['summoner_id'])
+        embed = await create_rank_embed(game_name, tag_line, summoner_info, rank_info)
+        await message.channel.send(embed=embed)
+
+    elif message.content.startswith('!모니터링추가 '):
+      parts = message.content.split(' ', 1)
+      if len(parts) < 2:
+          await message.channel.send('올바른 형식: 이름#태그')
+          return
+
+      riot_id = parts[1].strip()
+      monitoring_list.add(riot_id)
+      monitoring_channel = message.channel
+      await message.channel.send(f"✅ `{riot_id}` 모니터링 리스트에 추가했어!")
+
+      # 소환사 전적 Embed 바로 출력
+      game_name, tag_line = riot_id.split('#', 1)
+      summoner_info = await fetch_summoner_info(game_name, tag_line)
+      if not summoner_info:
+          await message.channel.send('소환사 정보를 찾을 수 없습니다.')
+          return
+
+      rank_info = await fetch_rank_info(summoner_info['summoner_id'])
+      embed = await create_rank_embed(game_name, tag_line, summoner_info, rank_info)
+      await message.channel.send(embed=embed)
+
+      # 추가한 직후 바로 연패 상태도 체크
+      puuid = summoner_info['puuid']
+      headers = {'X-Riot-Token': RIOT_API_KEY}
+      match_url = f'https://{REGION_ROUTING}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start=0&count=10'
+      match_res = requests.get(match_url, headers=headers)
+      if match_res.status_code == 200:
+          match_ids = match_res.json()
+
+          lose_streak = 0
+          for match_id in match_ids:
+              match_detail_url = f'https://{REGION_ROUTING}.api.riotgames.com/lol/match/v5/matches/{match_id}'
+              match_detail_res = requests.get(match_detail_url, headers=headers)
+              if match_detail_res.status_code != 200:
+                  continue
+              match_detail = match_detail_res.json()
+              participants = match_detail['info']['participants']
+              player = next((p for p in participants if p['puuid'] == puuid), None)
+              if player:
+                  if player['win']:
+                      break
+                  else:
+                      lose_streak += 1
+
+          if lose_streak >= 3:
+              embed = discord.Embed(
+                  title=f"{game_name}#{tag_line} {lose_streak}연패 중!",
+                  color=discord.Color.red()
+              )
+              await monitoring_channel.send(embed=embed)
+
+    elif message.content.startswith('!모니터링삭제 '):
+        riot_id = message.content[8:].strip()
+        if riot_id in monitoring_list:
+            monitoring_list.remove(riot_id)
+            await message.channel.send(f"✅ `{riot_id}` 모니터링 리스트에서 삭제했어!")
+        else:
+            await message.channel.send(f"❌ `{riot_id}` 은 모니터링 리스트에 없어.")
+
+    elif message.content.startswith('!모니터링리스트'):
+        if not monitoring_list:
+            await message.channel.send('현재 모니터링하는 소환사가 없어.')
+        else:
+            list_text = "\n".join(monitoring_list)
+            await message.channel.send(f"📋 현재 모니터링 리스트:\n{list_text}")
+
+    elif message.content.startswith('!실시간추가'):
+      parts = message.content.split(' ', 1)
+      if len(parts) < 2:
+          await message.channel.send('올바른 형식: 이름#태그')
+          return
+      riot_id = parts[1].strip()
+      
+      real_time_monitoring_list.add(riot_id)
+      monitoring_channel = message.channel
+      await message.channel.send(f"✅ `{riot_id}` 실시간 감시 리스트에 추가했어!")
+
+      game_name, tag_line = riot_id.split('#', 1)
+      summoner_info = await fetch_summoner_info(game_name, tag_line)
+      if not summoner_info:
+          await message.channel.send('소환사 정보를 찾을 수 없습니다.')
+          return
+      rank_info = await fetch_rank_info(summoner_info['summoner_id'])
+      embed = await create_rank_embed(game_name, tag_line, summoner_info, rank_info)
+      await message.channel.send(embed=embed)
+
+    elif message.content.startswith('!실시간삭제 '):
+        riot_id = message.content[8:].strip()
+        if riot_id in real_time_monitoring_list:
+            real_time_monitoring_list.remove(riot_id)
+            await message.channel.send(f"✅ `{riot_id}` 실시간 감시 리스트에서 삭제했어!")
+        else:
+            await message.channel.send(f"❌ `{riot_id}` 은 실시간 감시 리스트에 없어.")
+
+    elif message.content.startswith('!실시간리스트'):
+        if not real_time_monitoring_list:
+            await message.channel.send('현재 실시간 감시하는 소환사가 없어.')
+        else:
+            list_text = "\n".join(real_time_monitoring_list)
+            await message.channel.send(f"📋 현재 실시간 감시 리스트:\n{list_text}")
+            
+    elif message.content.startswith('!푸바오'):
+        riot_id = '강해린#왕자님'
+        game_name, tag_line = riot_id.split('#', 1)
+        await message.channel.send(f"[{game_name}#{tag_line}] 전적을 불러오는 중...")
+
+        summoner_info = await fetch_summoner_info(game_name, tag_line)
+        if not summoner_info:
+            await message.channel.send('소환사 정보를 찾을 수 없습니다.')
+            return
+
+        rank_info = await fetch_rank_info(summoner_info['summoner_id'])
+        embed = await create_rank_embed(game_name, tag_line, summoner_info, rank_info)
+        await message.channel.send(embed=embed)
+
+    elif message.content == '/help':
+        embed = discord.Embed(
+            title="🛠️ 사용 가능한 명령어 목록",
+            description="명령어를 입력해서 기능을 사용할 수 있습니다!",
+            color=discord.Color.purple()
+        )
+        embed.add_field(name="!전적 [이름#태그]", value="소환사 전적 조회", inline=False)
+        embed.add_field(name="!모니터링추가 [이름#태그]", value="3연패 이상 감시 추가", inline=False)
+        embed.add_field(name="!모니터링삭제 [이름#태그]", value="연패 감시 삭제", inline=False)
+        embed.add_field(name="!모니터링리스트", value="연패 감시 리스트 조회", inline=False)
+        embed.add_field(name="!실시간추가 [이름#태그]", value="실시간 게임 감시 추가", inline=False)
+        embed.add_field(name="!실시간삭제 [이름#태그]", value="실시간 감시 삭제", inline=False)
+        embed.add_field(name="!실시간리스트", value="실시간 감시 리스트 조회", inline=False)
+        embed.add_field(name="!푸바오", value="강해린#왕자님 전적 조회", inline=False)
+        embed.add_field(name="/help", value="명령어 설명 보기", inline=False)
+        
+        await message.channel.send(embed=embed)
+
+bot.run(DISCORD_TOKEN)
