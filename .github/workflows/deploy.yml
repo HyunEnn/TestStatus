@@ -1,0 +1,30 @@
+name: Discord Bot CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Build Docker Image
+      run: |
+        docker build -t my-discord-bot .
+
+    - name: Run Docker Container
+      run: |
+        docker stop discord-bot-container || true
+        docker rm discord-bot-container || true
+        docker run -d --restart always --name discord-bot-container \
+          -e DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }} \
+          -e RIOT_API_KEY=${{ secrets.RIOT_API_KEY }} \
+          my-discord-bot
