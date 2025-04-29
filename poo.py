@@ -82,17 +82,19 @@ async def create_rank_embed(game_name, tag_line, summoner_info, rank_info):
     embed.add_field(name="승/패", value=f"{wins}승 {losses}패", inline=True)
     embed.add_field(name="승률", value=f"{winrate}%", inline=True)
     embed.add_field(
-      name="상세 전적",
-      value=f"[lol.ps](https://lol.ps/summoner/{game_name}_{tag_line}?region=kr)",
-      inline=False
+        name="상세 전적",
+        value=f"[lol.ps](https://lol.ps/summoner/{game_name}_{tag_line}?region=kr)",
+        inline=False
     )
 
     return embed
 
-async def check_in_game_status(summoner_id):
+async def check_in_game_status(puuid):
     headers = {'X-Riot-Token': RIOT_API_KEY}
-    url = f'https://{REGION}.api.riotgames.com/lol/spectator/v4/active-games/by-summoner/{summoner_id}'
+    url = f'https://{REGION_ROUTING}.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}'
     response = requests.get(url, headers=headers)
+
+    print(f"[SpectatorV5] PUUID={puuid}, Status={response.status_code}")
     return response.status_code == 200
 
 async def monitoring_task():
@@ -159,8 +161,8 @@ async def real_time_monitoring_task():
                 print(f"[실시간감시] {riot_id} 정보 없음")
                 continue
 
-            summoner_id = summoner_info['summoner_id']
-            in_game = await check_in_game_status(summoner_id)
+            puuid = summoner_info['puuid']
+            in_game = await check_in_game_status(puuid)
 
             print(f"[실시간감시] {riot_id} - {'게임중' if in_game else '게임 안함'}")
 
