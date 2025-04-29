@@ -11,5 +11,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 나머지 소스 파일 복사
 COPY . .
 
-# 서버 실행 명령어
+# 서버 실행 명령어 
 CMD ["python", "poo.py"]
