@@ -4,7 +4,7 @@ FROM python:3.11-slim
 # 작업 디렉터리 설정
 WORKDIR /app
 
-# requirements.txt 먼저 복사하고 설치
+# requirements.txt 복사후 설치
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
