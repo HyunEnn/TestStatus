@@ -164,7 +164,7 @@ async def real_time_monitoring_task():
             if in_game and last_in_game_status.get(riot_id) != "in_game":
                 embed = discord.Embed(
                     title=f"{game_name}#{tag_line} 게임 시작!",
-                    description="🕹️ 현재 게임이 진행 중입니다!",
+                    description="🕹️ 현재 게임이 진행 중이에요!",
                     color=discord.Color.gold()
                 )
                 await monitoring_channel.send(embed=embed)
@@ -199,7 +199,7 @@ async def on_message(message):
 
         summoner_info = await fetch_summoner_info(game_name, tag_line)
         if not summoner_info:
-            await message.channel.send('소환사 정보를 찾을 수 없습니다.')
+            await message.channel.send('소환사 정보를 찾을 수 없어.')
             return
 
         rank_info = await fetch_rank_info(summoner_info['summoner_id'])
@@ -213,17 +213,23 @@ async def on_message(message):
           return
 
       riot_id = parts[1].strip()
-      monitoring_list.add(riot_id)
-      monitoring_channel = message.channel
-      await message.channel.send(f"✅ `{riot_id}` 모니터링 리스트에 추가했어!")
+      
+      if(riot_id in monitoring_list):
+          await message.channel.send(f"❌ `{riot_id}` 은 이미 리스트에 있어")
+          return
+    
 
       # 소환사 전적 Embed 바로 출력
       game_name, tag_line = riot_id.split('#', 1)
       summoner_info = await fetch_summoner_info(game_name, tag_line)
       if not summoner_info:
-          await message.channel.send('소환사 정보를 찾을 수 없습니다.')
+          await message.channel.send('소환사 정보를 찾을 수 없어.')
           return
-
+      
+      monitoring_list.add(riot_id)
+      monitoring_channel = message.channel
+      await message.channel.send(f"✅ `{riot_id}` 모니터링 리스트에 추가했어!")
+  
       rank_info = await fetch_rank_info(summoner_info['summoner_id'])
       embed = await create_rank_embed(game_name, tag_line, summoner_info, rank_info)
       await message.channel.send(embed=embed)
@@ -287,7 +293,7 @@ async def on_message(message):
       game_name, tag_line = riot_id.split('#', 1)
       summoner_info = await fetch_summoner_info(game_name, tag_line)
       if not summoner_info:
-          await message.channel.send('소환사 정보를 찾을 수 없습니다.')
+          await message.channel.send('소환사 정보를 찾을 수 없어.')
           return
       rank_info = await fetch_rank_info(summoner_info['summoner_id'])
       embed = await create_rank_embed(game_name, tag_line, summoner_info, rank_info)
@@ -315,7 +321,7 @@ async def on_message(message):
 
         summoner_info = await fetch_summoner_info(game_name, tag_line)
         if not summoner_info:
-            await message.channel.send('소환사 정보를 찾을 수 없습니다.')
+            await message.channel.send('소환사 정보를 찾을 수 없어.')
             return
 
         rank_info = await fetch_rank_info(summoner_info['summoner_id'])
