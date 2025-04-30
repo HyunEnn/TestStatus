@@ -91,7 +91,7 @@ async def create_rank_embed(game_name, tag_line, summoner_info, rank_info):
 
 async def check_in_game_status(puuid):
     headers = {'X-Riot-Token': RIOT_API_KEY}
-    url = f'https://{REGION_ROUTING}.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}'
+    url = f'https://{REGION}.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}'
     response = requests.get(url, headers=headers)
 
     print(f"[SpectatorV5] PUUID={puuid}, Status={response.status_code}")
@@ -179,6 +179,17 @@ async def real_time_monitoring_task():
                 last_in_game_status[riot_id] = "idle"
 
         await asyncio.sleep(60)
+
+async def fetch_current_game_info(puuid):
+    headers = {'X-Riot-Token': RIOT_API_KEY}
+    url = f'https://{REGION}.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}'
+    res = requests.get(url, headers=headers)
+
+    print(f"[InGameInfo] PUUID={puuid}, Status={res.status_code}")
+    if res.status_code != 200:
+        return None
+
+    return res.json()
 
 @bot.event
 async def on_ready():
@@ -269,7 +280,12 @@ async def on_message(message):
                 await monitoring_channel.send(embed=embed)
 
     elif message.content.startswith('!모니터링삭제 '):
-        riot_id = message.content[8:].strip()
+        parts = message.content.split(' ', 1)
+        if len(parts) < 2:
+            await message.channel.send('올바른 형식: 이름#태그')
+            return
+
+        riot_id = parts[1].strip()
         if riot_id in monitoring_list:
             monitoring_list.remove(riot_id)
             await message.channel.send(f"✅ `{riot_id}` 모니터링 리스트에서 삭제했어!")
@@ -300,7 +316,7 @@ async def on_message(message):
         game_name, tag_line = riot_id.split('#', 1)
         summoner_info = await fetch_summoner_info(game_name, tag_line)
         if not summoner_info:
-            await message.channel.send(f"❌ `{riot_id}` 소환사 정보를 찾을 수 없습니다. 감시 리스트에 추가되지 않았습니다.")
+            await message.channel.send(f"❌ `{riot_id}` 소환사 정보를 찾을 수 없어. 감시 리스트에 추가되지 않았어.")
             return
 
         # 정상적으로 추가
@@ -314,7 +330,12 @@ async def on_message(message):
         await message.channel.send(embed=embed)
 
     elif message.content.startswith('!실시간삭제 '):
-        riot_id = message.content[8:].strip()
+        parts = message.content.split(' ', 1)
+        if len(parts) < 2:
+            await message.channel.send('올바른 형식: 이름#태그')
+            return
+
+        riot_id = parts[1].strip()
         if riot_id in real_time_monitoring_list:
             real_time_monitoring_list.remove(riot_id)
             await message.channel.send(f"✅ `{riot_id}` 실시간 감시 리스트에서 삭제했어!")
@@ -342,6 +363,39 @@ async def on_message(message):
         embed = await create_rank_embed(game_name, tag_line, summoner_info, rank_info)
         await message.channel.send(embed=embed)
 
+    elif message.content.startswith('!인게임정보'):
+        parts = message.content.split(' ', 1)
+        if len(parts) < 2 or '#' not in parts[1]:
+            await message.channel.send("형식: `!인게임정보 이름#태그`")
+            return
+
+        riot_id = parts[1].strip()
+        game_name, tag_line = riot_id.split('#', 1)
+        summoner_info = await fetch_summoner_info(game_name, tag_line)
+        if not summoner_info:
+            await message.channel.send("소환사 정보를 찾을 수 없어.")
+            return
+
+        game_data = await fetch_current_game_info(summoner_info['puuid'])
+        if not game_data:
+            await message.channel.send(f"{game_name}#{tag_line}님은 현재 게임 중이 아니야.")
+            return
+
+        game_mode = game_data.get('gameMode', '알 수 없음')
+        game_start = int(game_data['gameStartTime'] / 1000)
+        embed = discord.Embed(
+            title=f"{game_name}#{tag_line} 현재 게임 정보",
+            description=f"게임 모드: {game_mode}\n시작 시간: <t:{game_start}:R>",
+            color=discord.Color.green()
+        )
+
+        blue_team = [p['summonerName'] for p in game_data['participants'] if p['teamId'] == 100]
+        red_team = [p['summonerName'] for p in game_data['participants'] if p['teamId'] == 200]
+        embed.add_field(name="🟦 블루팀", value="\n".join(blue_team), inline=True)
+        embed.add_field(name="🟥 레드팀", value="\n".join(red_team), inline=True)
+
+        await message.channel.send(embed=embed)
+
     elif message.content == '/help':
         embed = discord.Embed(
             title="🛠️ 사용 가능한 명령어 목록",
@@ -356,6 +410,7 @@ async def on_message(message):
         embed.add_field(name="!실시간삭제 [이름#태그]", value="실시간 감시 삭제", inline=False)
         embed.add_field(name="!실시간리스트", value="실시간 감시 리스트 조회", inline=False)
         embed.add_field(name="!푸바오", value="강해린#왕자님 전적 조회", inline=False)
+        embed.add_field(name="!인게임정보 [이름#태그]", Value="인게임 정보 조회", inline=False)
         embed.add_field(name="/help", value="명령어 설명 보기", inline=False)
         
         await message.channel.send(embed=embed)
