@@ -410,7 +410,7 @@ async def on_message(message):
         embed.add_field(name="!실시간삭제 [이름#태그]", value="실시간 감시 삭제", inline=False)
         embed.add_field(name="!실시간리스트", value="실시간 감시 리스트 조회", inline=False)
         embed.add_field(name="!푸바오", value="강해린#왕자님 전적 조회", inline=False)
-        embed.add_field(name="!인게임정보 [이름#태그]", Value="인게임 정보 조회", inline=False)
+        embed.add_field(name="!인게임정보 [이름#태그]", value="인게임 정보 조회", inline=False)
         embed.add_field(name="/help", value="명령어 설명 보기", inline=False)
         
         await message.channel.send(embed=embed)
