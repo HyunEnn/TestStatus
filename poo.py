@@ -4,6 +4,8 @@ import asyncio
 import os
 import urllib.parse
 from dotenv import load_dotenv
+from datetime import datetime, timedelta, timezone
+import time
 
 load_dotenv()
 
@@ -20,6 +22,11 @@ bot = discord.Client(intents=intents)
 monitoring_list = set()  # 3연패 이상 감시 리스트
 real_time_monitoring_list = set()  # 실시간 게임 감시 리스트
 monitoring_channel = None
+
+last_alert = {}  # riot_id -> 마지막 연패 카운트
+last_in_game_status = {}  # riot_id -> "in_game" / "idle"
+last_game_time = {}  # riot_id -> 마지막 게임 시작 시간
+RESUME_COOLDOWN = 7200  # 2시간 (단위: 초)
 
 TIER_ICON_URL = "https://raw.communitydragon.org/15.2/plugins/rcp-fe-lol-static-assets/global/default/images/ranked-emblem/emblem-{tier}.png"
 
@@ -97,6 +104,35 @@ async def check_in_game_status(puuid):
     print(f"[SpectatorV5] PUUID={puuid}, Status={response.status_code}")
     return response.status_code == 200
 
+async def fetch_today_game_count(puuid):
+    headers = {'X-Riot-Token': RIOT_API_KEY}
+
+    # 오늘 0시 타임스탬프 계산
+    now = int(time.time())
+    kst_now = datetime.fromtimestamp(now, timezone(timedelta(hours=9)))
+    kst_midnight = datetime(kst_now.year, kst_now.month, kst_now.day, tzinfo=timezone(timedelta(hours=9)))
+    midnight_timestamp = int(kst_midnight.timestamp()) * 1000  # 밀리초 단위
+
+    # 최근 30게임 조회
+    match_url = f'https://{REGION_ROUTING}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start=0&count=30'
+    match_res = requests.get(match_url, headers=headers)
+    if match_res.status_code != 200:
+        return None
+
+    match_ids = match_res.json()
+    today_count = 0
+
+    for match_id in match_ids:
+        detail_url = f'https://{REGION_ROUTING}.api.riotgames.com/lol/match/v5/matches/{match_id}'
+        res = requests.get(detail_url, headers=headers)
+        if res.status_code != 200:
+            continue
+        game_info = res.json()
+        if game_info['info']['gameStartTimestamp'] >= midnight_timestamp:
+            today_count += 1
+
+    return today_count
+
 async def monitoring_task():
     await bot.wait_until_ready()
     last_alert = {}
@@ -114,7 +150,7 @@ async def monitoring_task():
 
             puuid = summoner_info['puuid']
             headers = {'X-Riot-Token': RIOT_API_KEY}
-            match_url = f'https://{REGION_ROUTING}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start=0&count=10'
+            match_url = f'https://{REGION_ROUTING}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start=0&count=20'
             match_res = requests.get(match_url, headers=headers)
             if match_res.status_code != 200:
                 continue
@@ -147,12 +183,13 @@ async def monitoring_task():
 
 async def real_time_monitoring_task():
     await bot.wait_until_ready()
-    last_in_game_status = {}
 
     while not bot.is_closed():
         if monitoring_channel is None or not real_time_monitoring_list:
             await asyncio.sleep(60)
             continue
+
+        current_time = time.time()
 
         for riot_id in real_time_monitoring_list:
             game_name, tag_line = riot_id.split('#')
@@ -162,20 +199,30 @@ async def real_time_monitoring_task():
                 continue
 
             puuid = summoner_info['puuid']
-            in_game = await check_in_game_status(puuid)
+            headers = {'X-Riot-Token': RIOT_API_KEY}
+            url = f'https://{REGION}.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}'
+            res = requests.get(url, headers=headers)
+            in_game = res.status_code == 200
 
             print(f"[실시간감시] {riot_id} - {'게임중' if in_game else '게임 안함'}")
 
-            if in_game and last_in_game_status.get(riot_id) != "in_game":
-                embed = discord.Embed(
-                    title=f"{game_name}#{tag_line} 게임 시작!",
-                    description="🕹️ 현재 게임이 진행 중이에요!",
-                    color=discord.Color.gold()
-                )
-                await monitoring_channel.send(embed=embed)
-                last_in_game_status[riot_id] = "in_game"
+            if in_game:
+                game_data = res.json()
+                game_start = int(game_data['gameStartTime'] / 1000)
+                last_time = last_game_time.get(riot_id, 0)
 
-            elif not in_game:
+                if last_in_game_status.get(riot_id) != "in_game" and (current_time - last_time > RESUME_COOLDOWN):
+                    embed = discord.Embed(
+                        title=f"{game_name}#{tag_line} 게임 시작!",
+                        description="🕹️ 게임을 시작했어!",
+                        color=discord.Color.gold()
+                    )
+                    await monitoring_channel.send(embed=embed)
+
+                # 상태, 시간 업데이트
+                last_in_game_status[riot_id] = "in_game"
+                last_game_time[riot_id] = game_start
+            else:
                 last_in_game_status[riot_id] = "idle"
 
         await asyncio.sleep(60)
@@ -194,8 +241,10 @@ async def fetch_current_game_info(puuid):
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
-    bot.loop.create_task(monitoring_task())
-    bot.loop.create_task(real_time_monitoring_task())
+    if not hasattr(bot, 'tasks_started'):
+        bot.loop.create_task(monitoring_task())
+        bot.loop.create_task(real_time_monitoring_task())
+        bot.tasks_started = True
 
 @bot.event
 async def on_message(message):
@@ -395,6 +444,28 @@ async def on_message(message):
         embed.add_field(name="🟥 레드팀", value="\n".join(red_team), inline=True)
 
         await message.channel.send(embed=embed)
+        
+    elif message.content.startswith('!오늘몇판 '):
+        parts = message.content.split(' ', 1)
+
+        if len(parts) < 2 or '#' not in parts[1]:
+            await message.channel.send("형식: `!인게임정보 이름#태그`")
+            return
+
+        riot_id = parts[1].strip()
+        game_name, tag_line = riot_id.split('#', 1)
+        summoner_info = await fetch_summoner_info(game_name, tag_line)
+        if not summoner_info:
+            await message.channel.send("소환사 정보를 찾을 수 없어.")
+            return
+
+        puuid = summoner_info['puuid']
+        today_count = await fetch_today_game_count(puuid)
+
+        if today_count is None:
+            await message.channel.send("데이터를 불러오는 데 실패했어요.")
+        else:
+            await message.channel.send(f"📊 `{game_name}#{tag_line}` 님은 오늘 총 **{today_count}판** 진행했어!")
 
     elif message.content == '/help':
         embed = discord.Embed(
@@ -402,15 +473,16 @@ async def on_message(message):
             description="명령어를 입력해서 기능을 사용할 수 있습니다!",
             color=discord.Color.purple()
         )
-        embed.add_field(name="!전적 [이름#태그]", value="소환사 전적 조회", inline=False)
-        embed.add_field(name="!모니터링추가 [이름#태그]", value="3연패 이상 감시 추가", inline=False)
-        embed.add_field(name="!모니터링삭제 [이름#태그]", value="연패 감시 삭제", inline=False)
+        embed.add_field(name="!전적 이름#태그", value="소환사 전적 조회", inline=False)
+        embed.add_field(name="!모니터링추가 이름#태그", value="3연패 이상 감시 추가", inline=False)
+        embed.add_field(name="!모니터링삭제 이름#태그", value="연패 감시 삭제", inline=False)
         embed.add_field(name="!모니터링리스트", value="연패 감시 리스트 조회", inline=False)
-        embed.add_field(name="!실시간추가 [이름#태그]", value="실시간 게임 감시 추가", inline=False)
-        embed.add_field(name="!실시간삭제 [이름#태그]", value="실시간 감시 삭제", inline=False)
+        embed.add_field(name="!실시간추가 이름#태그", value="실시간 게임 감시 추가", inline=False)
+        embed.add_field(name="!실시간삭제 이름#태그", value="실시간 감시 삭제", inline=False)
         embed.add_field(name="!실시간리스트", value="실시간 감시 리스트 조회", inline=False)
         embed.add_field(name="!푸바오", value="강해린#왕자님 전적 조회", inline=False)
-        embed.add_field(name="!인게임정보 [이름#태그]", value="인게임 정보 조회", inline=False)
+        embed.add_field(name="!인게임정보 이름#태그", value="인게임 정보 조회", inline=False)
+        embed.add_field(name="!오늘몇판 이름#태그", value="오늘 판수 조회", inline=False)
         embed.add_field(name="/help", value="명령어 설명 보기", inline=False)
         
         await message.channel.send(embed=embed)
